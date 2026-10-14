@@ -186,7 +186,42 @@ fn styles_theme_and_sizes() {
         r => panic!("{r:?}"),
     }
     assert_eq!(s.print.paper, "A4");
+    assert!(s.print.paper_set);
     assert_eq!(s.print.fit_to, Some((1, 0)));
+}
+
+/// Every `paperSize` id is kept: ones the old 14-entry table lacked (Statement, A6…) and ids
+/// beyond the standard table, which round-trip as `Paper <id>`. Without the attribute the
+/// sheet has no paper of its own.
+#[test]
+fn paper_size_ids_survive_a_round_trip() {
+    fn part(bytes: &[u8], name: &str) -> String {
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut z.by_name(name).unwrap_or_else(|_| panic!("{name}")), &mut s).unwrap();
+        s
+    }
+    let write_xlsx = crate::write_xlsx;
+    for (id, name) in [(6u32, "Statement"), (14, "Folio"), (28, "Envelope C5"), (66, "A2"), (70, "A6"), (200, "Paper 200"), (1, "Letter")] {
+        let body = format!(r#"<sheetData/><pageSetup paperSize="{id}" orientation="portrait"/>"#);
+        let bytes = minimal(&body, &[], "", "");
+        let (wb, _) = read_xlsx(&bytes).unwrap();
+        let s = wb.sheet(0).unwrap();
+        assert_eq!(s.print.paper, name, "id {id}");
+        assert!(s.print.paper_set);
+        let out = write_xlsx(&wb).unwrap();
+        let xml = part(&out, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains(&format!(r#"paperSize="{id}""#)), "id {id} written back: {xml}");
+        let (back, _) = read_xlsx(&out).unwrap();
+        assert_eq!(back.sheet(0).unwrap().print.paper, name);
+    }
+    let bytes = minimal(r#"<sheetData/><pageMargins left="0.75" right="0.75" top="1" bottom="1" header="0.5" footer="0.5"/>"#, &[], "", "");
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    let s = wb.sheet(0).unwrap();
+    assert_eq!(s.print.paper, "Letter");
+    assert!(!s.print.paper_set, "no <pageSetup>: the sheet names no paper");
+    let xml = part(&write_xlsx(&wb).unwrap(), "xl/worksheets/sheet1.xml");
+    assert!(!xml.contains("paperSize"), "{xml}");
 }
 
 #[test]

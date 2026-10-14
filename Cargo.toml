@@ -39,6 +39,9 @@ sha2 = { version = "0.11", default-features = false }
 aes = { version = "0.9", default-features = false }
 sha1 = { version = "0.11", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# PDF export embeds a system font (CID TrueType/CFF subset) for text outside WinAnsi, e.g. Korean.
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+subsetter = "0.2"
 
 # ui
 egui = "0.36"

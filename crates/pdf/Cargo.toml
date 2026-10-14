@@ -3,9 +3,11 @@ name = "gridcraft-pdf"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "GridCraft's tiny self-contained PDF 1.7 writer (standard 14 fonts, vector drawing, RGBA images)"
+description = "GridCraft's tiny PDF 1.7 writer (standard 14 fonts plus an embedded fallback font subset, vector drawing, RGBA images)"
 
 [lints]
 workspace = true
 
 [dependencies]
+ttf-parser = { workspace = true }
+subsetter = { workspace = true }

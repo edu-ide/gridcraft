@@ -8,6 +8,7 @@ mod b64;
 pub mod cell;
 mod cellmap;
 pub mod features;
+pub mod paper;
 pub mod password;
 pub mod preserved;
 pub mod sheet;
@@ -17,6 +18,7 @@ pub mod workbook;
 
 pub use cell::{Cell, CellPicture, Formula};
 pub use features::*;
+pub use paper::{COMMON_PAPERS, DEFAULT_PAPER, paper_id, paper_name, paper_size_pt};
 pub use password::PasswordHash;
 pub use preserved::{Preserved, PreservedPart, PreservedRel, PreservedSheet, PreservedXml};
 pub use sheet::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, LineIndex, Sheet, SheetViewMode, Visibility, points_to_chars};

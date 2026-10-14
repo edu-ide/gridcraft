@@ -64,31 +64,9 @@ pub const INDEXED: [u32; 64] = [
     0x003366, 0x339966, 0x003300, 0x333300, 0x993300, 0x993366, 0x333399, 0x333333, // 56-63
 ];
 
-/// Paper sizes (`pageSetup paperSize`) we name.
-const PAPERS: [(u32, &str); 14] = [
-    (1, "Letter"),
-    (3, "Tabloid"),
-    (4, "Ledger"),
-    (5, "Legal"),
-    (6, "Statement"),
-    (7, "Executive"),
-    (8, "A3"),
-    (9, "A4"),
-    (11, "A5"),
-    (12, "B4"),
-    (13, "B5"),
-    (20, "Envelope #10"),
-    (27, "Envelope DL"),
-    (34, "Envelope B5"),
-];
-
-pub fn paper_name(id: u32) -> Option<&'static str> {
-    PAPERS.iter().find(|(i, _)| *i == id).map(|(_, n)| *n)
-}
-
-pub fn paper_id(name: &str) -> Option<u32> {
-    PAPERS.iter().find(|(_, n)| n.eq_ignore_ascii_case(name.trim())).map(|(i, _)| *i)
-}
+/// Paper sizes (`pageSetup paperSize`): the model's one table, so reader, writer and
+/// printer never disagree.
+pub use gridcraft_model::{paper_id, paper_name};
 
 /// Functions introduced after Excel 2007 that files store with the `_xlfn.` prefix. Entries with
 /// `_xlws.` get `_xlfn._xlws.`.
@@ -337,7 +315,8 @@ mod tests {
         assert_eq!(builtin_format(14), Some("m/d/yyyy"));
         assert_eq!(builtin_id("0.00%"), Some(10));
         assert_eq!(builtin_id(builtin_format(5).unwrap()), None);
-        assert_eq!(paper_name(9), Some("A4"));
+        assert_eq!(paper_name(9), "A4");
+        assert_eq!(paper_name(200), "Paper 200");
         assert_eq!(paper_id("a4"), Some(9));
     }
 }

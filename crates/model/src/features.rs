@@ -671,8 +671,13 @@ pub enum Orientation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PrintSettings {
     pub orientation: Orientation,
-    /// Paper size name (`Letter`, `A4`, `Legal`…).
+    /// Paper size name (`Letter`, `A4`, `Legal`…; see [`crate::paper`]).
     pub paper: String,
+    /// Whether the sheet states its paper (the file had `paperSize`, or Page Setup chose one).
+    /// A sheet that doesn't prints on `paper` (Letter) unless the printer or exporter supplies
+    /// its own default, as Excel does with the default printer's paper.
+    #[serde(default)]
+    pub paper_set: bool,
     /// Margins in inches: left, right, top, bottom, header, footer.
     pub margins: [f32; 6],
     pub print_area: Option<RangeRef>,
@@ -783,7 +788,8 @@ impl Default for PrintSettings {
     fn default() -> Self {
         PrintSettings {
             orientation: Orientation::Portrait,
-            paper: "Letter".into(),
+            paper: crate::paper::DEFAULT_PAPER.into(),
+            paper_set: false,
             margins: [0.7, 0.7, 0.75, 0.75, 0.3, 0.3],
             print_area: None,
             title_rows: None,

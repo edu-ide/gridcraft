@@ -259,6 +259,7 @@ fn sample() -> Workbook {
     s.print = PrintSettings {
         orientation: Orientation::Landscape,
         paper: "A4".into(),
+        paper_set: true,
         margins: [0.5, 0.6, 0.7, 0.8, 0.2, 0.25],
         print_area: Some(rr("A1:H30")),
         title_rows: Some((0, 1)),

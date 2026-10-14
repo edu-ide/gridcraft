@@ -23,7 +23,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Export as PDF",
             ["File", "Export"],
             None,
-            "{path?, sheets?: active|all, range?: \"A1:F40\" (active sheet), fitToPage?: bool} → {pages, bytes, path} or {pages, bytes, base64} when no path. Honours each sheet's Page Setup.",
+            "{path?, sheets?: active|all, range?: \"A1:F40\" (active sheet), fitToPage?: bool, paper?: Letter|A4|… (for sheets whose Page Setup names no paper, like the default printer's paper)} → {pages, bytes, path} or {pages, bytes, base64} when no path. Honours each sheet's Page Setup.",
             has_doc,
             export_pdf
         ),
@@ -32,7 +32,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Print…",
             ["File"],
             Some("Cmd+P"),
-            "{path?, sheets?: active|all, range?, fitToPage?: bool} → {pages, bytes, base64} — the PDF the UI hands to the system print dialog",
+            "{path?, sheets?: active|all, range?, fitToPage?: bool, paper?} → {pages, bytes, base64} — the PDF the UI hands to the system print dialog",
             has_doc,
             print
         ),
@@ -41,7 +41,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Print Preview",
             ["File"],
             None,
-            "{page? (1-based), sheets?: active|all, range?, fitToPage?} → {pages, pageList: [{page, sheet, range, rows, columns, scale, paper, orientation, width, height}]}",
+            "{page? (1-based), sheets?: active|all, range?, fitToPage?, paper?} → {pages, pageList: [{page, sheet, range, rows, columns, scale, paper, orientation, width, height}]}",
             has_doc,
             print_preview
         ),
@@ -50,7 +50,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Page Setup…",
             ["Page Layout", "Page Setup"],
             None,
-            "{sheet?, orientation?: portrait|landscape, paper?: Letter|Legal|A4|A3|A5|Tabloid|Executive|Ledger|B5, margins?: {left,right,top,bottom,header,footer} (inches; also accepted as top-level keys), scale?: 10..400, fitWidth?, fitHeight? (pages; 0 = automatic), fitToPage?: bool, centerH?, centerV?, gridlines?, headings?, header?: \"&L&A&RPage &P of &N\", footer?, printArea?: \"A1:F50\" (\"\" clears), titleRows?: \"1:2\", titleCols?: \"A:A\", rowBreaks?: [46, 91], colBreaks?: [\"K\"]} → the sheet's print settings",
+            "{sheet?, orientation?: portrait|landscape, paper?: Letter|Legal|A4|A3|A5|Tabloid|Executive|Ledger|B5|… (ECMA-376 paperSize names), margins?: {left,right,top,bottom,header,footer} (inches; also accepted as top-level keys), scale?: 10..400, fitWidth?, fitHeight? (pages; 0 = automatic), fitToPage?: bool, centerH?, centerV?, gridlines?, headings?, header?: \"&L&A&RPage &P of &N\", footer?, printArea?: \"A1:F50\" (\"\" clears), titleRows?: \"1:2\", titleCols?: \"A:A\", rowBreaks?: [46, 91], colBreaks?: [\"K\"]} → the sheet's print settings",
             has_doc,
             page_setup
         ),
@@ -66,26 +66,10 @@ const DENSE_BLOCK: u64 = 60_000;
 
 // ---------------------------------------------------------------- paper
 
-/// Paper size in points (portrait) for a paper name; unknown names fall back to Letter.
+/// Paper size in points (portrait) for a paper name; a name without known dimensions (an
+/// unknown name, or `Paper <id>` beyond the standard table) prints on Letter.
 pub fn paper_size(name: &str) -> (f32, f32) {
-    known_paper(name).unwrap_or((612.0, 792.0))
-}
-
-fn known_paper(name: &str) -> Option<(f32, f32)> {
-    let n = name.trim().to_ascii_lowercase().replace([' ', '-', '_'], "");
-    Some(match n.as_str() {
-        "letter" | "usletter" => (612.0, 792.0),
-        "legal" | "uslegal" => (612.0, 1008.0),
-        "a4" => (595.28, 841.89),
-        "a3" => (841.89, 1190.55),
-        "a5" => (419.53, 595.28),
-        "tabloid" | "11x17" => (792.0, 1224.0),
-        "ledger" => (1224.0, 792.0),
-        "executive" => (522.0, 756.0),
-        "b5" => (498.9, 708.66),
-        "b4" => (708.66, 1000.63),
-        _ => return None,
-    })
+    gridcraft_model::paper_size_pt(name).unwrap_or((612.0, 792.0))
 }
 
 // ---------------------------------------------------------------- layout
@@ -130,6 +114,9 @@ pub struct PrintOptions {
     pub all_sheets: bool,
     pub range: Option<RangeRef>,
     pub fit_to_page: Option<bool>,
+    /// The paper for sheets whose Page Setup names none, like the default printer's paper in
+    /// Excel. A sheet that states its paper keeps it.
+    pub paper: Option<String>,
 }
 
 impl PrintOptions {
@@ -143,8 +130,19 @@ impl PrintOptions {
             Some(r) => Some(RangeRef::parse(split_sheet(r).1).ok_or_else(|| bad(cmd, format!("not a range: `{r}`")))?),
             None => None,
         };
-        Ok(PrintOptions { all_sheets, range, fit_to_page: bool_param(p, "fitToPage") })
+        let paper = match str_param(p, "paper").map(str::trim).filter(|n| !n.is_empty()) {
+            Some(name) => Some(canonical_paper(name).ok_or_else(|| bad(cmd, format!("unknown paper size `{name}`")))?),
+            None => None,
+        };
+        Ok(PrintOptions { all_sheets, range, fit_to_page: bool_param(p, "fitToPage"), paper })
     }
+}
+
+/// The table name of a paper the user typed (`a4` → `A4`); `None` for a name without known
+/// dimensions.
+fn canonical_paper(name: &str) -> Option<String> {
+    let id = gridcraft_model::paper_id(name)?;
+    gridcraft_model::paper_size_pt(name).map(|_| gridcraft_model::paper_name(id))
 }
 
 /// The range a sheet prints: its print area, else the used range grown to cover drawing
@@ -229,7 +227,12 @@ fn title_span(t: Option<(u32, u32)>, max: u32) -> Option<(u32, u32)> {
 /// Paginates one sheet.
 pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_override: Option<RangeRef>) -> Option<SheetLayout> {
     let sh = wb.sheet(si)?;
-    let st = sh.print.clone();
+    let mut st = sh.print.clone();
+    if !st.paper_set
+        && let Some(p) = &opts.paper
+    {
+        st.paper = p.clone();
+    }
     let (mut pw, mut ph) = paper_size(&st.paper);
     if st.orientation == Orientation::Landscape {
         std::mem::swap(&mut pw, &mut ph);
@@ -1594,10 +1597,7 @@ fn page_setup(s: &mut Session, p: &Json) -> Result<Json> {
     };
     let paper = match str_param(p, "paper") {
         None => None,
-        Some(name) => {
-            known_paper(name).ok_or_else(|| bad(CMD, format!("unknown paper size `{name}`")))?;
-            Some(name.trim().to_string())
-        }
+        Some(name) => Some(canonical_paper(name).ok_or_else(|| bad(CMD, format!("unknown paper size `{name}`")))?),
     };
     let margin_src = p.get("margins").filter(|m| m.is_object()).unwrap_or(p);
     let mut margins: [Option<f32>; 6] = [None; 6];
@@ -1683,6 +1683,7 @@ fn page_setup(s: &mut Session, p: &Json) -> Result<Json> {
         }
         if let Some(pp) = &paper {
             pr.paper = pp.clone();
+            pr.paper_set = true;
         }
         for (i, m) in margins.iter().enumerate() {
             if let (Some(v), Some(slot)) = (m, pr.margins.get_mut(i)) {
@@ -2087,6 +2088,42 @@ mod tests {
         // With no workbook open it is a clear error, not a panic.
         let mut none = Session::new();
         assert!(none.execute("file.exportPdf", json!({})).is_err());
+    }
+
+    /// A sheet without a paper of its own prints on Letter, or on the exporter's `paper`; a
+    /// sheet that states its paper keeps it (the fixture workbooks from openpyxl have no
+    /// `<pageSetup>`, and Excel printed them on its printer's A4).
+    #[test]
+    fn export_paper_default_applies_only_to_sheets_without_one() {
+        let mut s = s();
+        s.execute("cell.set", json!({"cell": "A1", "input": "y"})).unwrap();
+        s.execute("home.insertSheet", json!({})).unwrap();
+        s.execute("sheet.rename", json!({"name": "Fixed"})).unwrap();
+        s.execute("cell.set", json!({"cell": "A1", "input": "x"})).unwrap();
+        s.execute("pageLayout.pageSetup", json!({"sheet": "Fixed", "paper": "letter"})).unwrap();
+        s.execute("sheet.activate", json!({"sheet": "Sheet1"})).unwrap();
+        let (bytes, pages) = pdf_of(&mut s, json!({"sheets": "all"}));
+        assert_eq!(pages, 2);
+        assert!(contains(&bytes, "/MediaBox [0 0 612 792]"), "no paper stated: Letter");
+        assert!(!contains(&bytes, "841.89"));
+        let (bytes, pages) = pdf_of(&mut s, json!({"sheets": "all", "paper": "a4"}));
+        assert_eq!(pages, 2);
+        assert!(contains(&bytes, "/MediaBox [0 0 595.276 841.89]"), "Sheet1 takes the export default");
+        assert!(contains(&bytes, "/MediaBox [0 0 612 792]"), "Fixed keeps its Letter");
+        let pv = s.execute("file.printPreview", json!({"sheets": "all", "paper": "A4"})).unwrap();
+        let papers: Vec<&str> = pv["pageList"].as_array().unwrap().iter().map(|p| p["paper"].as_str().unwrap()).collect();
+        assert_eq!(papers, ["A4", "Letter"]);
+        assert!(s.execute("file.exportPdf", json!({"paper": "Napkin"})).is_err());
+        assert!(s.execute("file.exportPdf", json!({"paper": "Paper 200"})).is_err(), "an id without dimensions is no default");
+        // Page Setup names the paper canonically and marks it as the sheet's own.
+        let r = s.execute("pageLayout.pageSetup", json!({"paper": " a3 "})).unwrap();
+        assert_eq!(r["paper"], "A3");
+        let (bytes, _) = pdf_of(&mut s, json!({"paper": "A4"}));
+        assert!(contains(&bytes, "/MediaBox [0 0 841.89 1190.551]"));
+        // Every paper in the table has a size; a landscape Statement is wider than tall.
+        s.execute("pageLayout.pageSetup", json!({"paper": "Statement", "orientation": "landscape"})).unwrap();
+        let (bytes, _) = pdf_of(&mut s, json!({}));
+        assert!(contains(&bytes, "/MediaBox [0 0 612 396]"));
     }
 
     #[test]

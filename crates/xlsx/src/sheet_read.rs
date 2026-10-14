@@ -126,8 +126,10 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<Sheet, IoE
                 if e.attr("orientation") == Some("landscape") {
                     sheet.print.orientation = Orientation::Landscape;
                 }
-                if let Some(p) = e.attr_u32("paperSize").and_then(paper_name) {
-                    sheet.print.paper = p.to_string();
+                // Any id is kept (`Paper <id>` beyond the standard table) so it survives a round trip.
+                if let Some(id) = e.attr_u32("paperSize") {
+                    sheet.print.paper = paper_name(id);
+                    sheet.print.paper_set = true;
                 }
                 if let Some(s) = e.attr_u32("scale") {
                     sheet.print.scale = s.clamp(10, 400) as u16;

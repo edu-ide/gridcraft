@@ -2,18 +2,25 @@
 //!
 //! - The 14 standard fonts (no embedding) with WinAnsiEncoding, plus approximate width tables
 //!   ([`text_width`]) so callers can measure, align and wrap text.
+//! - Text outside WinAnsi (Korean, Japanese, Chinese, Cyrillic, Greek…) is set in an embedded
+//!   subset of a system font ([`fallback`]); without one such characters print as `?`.
 //! - Vector drawing: rectangles, lines (solid or dashed), polygons, circles (Bézier), clipping.
 //! - RGBA images as RGB image XObjects with a soft mask for alpha (run-length encoded).
 //! - Coordinates are points with a **top-left origin** (y grows down); text `y` is the baseline.
 //!
-//! Streams are written uncompressed (images use the trivial RunLengthDecode filter) so the crate
-//! needs no dependencies.
+//! Streams are written uncompressed (images use the trivial RunLengthDecode filter); the only
+//! dependencies parse and subset the fallback font.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+pub mod fallback;
 mod metrics;
 
 use std::fmt::Write as _;
+use std::sync::Arc;
+
+pub use fallback::{FallbackFont, system_fallback};
+use fallback::{SharedSubset, Subset};
 
 /// RGB colour, 0–255 per channel.
 pub type Rgb = [u8; 3];
@@ -133,6 +140,12 @@ impl Font {
         if let Some(w) = ascii(c) {
             return w;
         }
+        if needs_fallback(c)
+            && let Some(f) = system_fallback()
+            && let Some(g) = f.glyph(c)
+        {
+            return f.advance_1000(g);
+        }
         match c {
             '—' | '…' | '‰' | '™' => 1000,
             _ => metrics::fold(c).and_then(ascii).unwrap_or(match self {
@@ -148,6 +161,11 @@ pub fn text_width(font: Font, size: f32, text: &str) -> f32 {
     // u64: a u32 sum overflows for ~8 million characters.
     let units: u64 = text.chars().map(|c| u64::from(font.char_width(c))).sum();
     units as f32 * size / 1000.0
+}
+
+/// Whether a character has no WinAnsi byte and so needs the embedded fallback font.
+pub fn needs_fallback(c: char) -> bool {
+    c != '?' && win_ansi(c) == b'?'
 }
 
 /// Unicode → WinAnsiEncoding (CP1252) byte; unmappable characters become `?`.
@@ -253,6 +271,13 @@ fn rgb_op(c: Rgb, stroke: bool) -> String {
     format!("{} {} {} {}", f(c[0]), f(c[1]), f(c[2]), if stroke { "RG" } else { "rg" })
 }
 
+/// A run of text set in one font.
+enum Run {
+    Std(String),
+    /// Subset glyph ids for the fallback face.
+    Fallback(Vec<u16>),
+}
+
 struct ImageData {
     width: u32,
     height: u32,
@@ -266,6 +291,10 @@ pub struct Page {
     height: f32,
     content: String,
     fonts: [bool; 12],
+    /// The embedded fallback font (`/F13`) was used on this page.
+    uses_fallback: bool,
+    fallback: Option<Arc<FallbackFont>>,
+    subset: SharedSubset,
     images: Vec<ImageData>,
     depth: u32,
 }
@@ -464,21 +493,55 @@ impl Page {
             *f = true;
         }
         let (sn, cs) = if angle.is_finite() { angle.sin_cos() } else { (0.0, 1.0) };
+        let size = size.min(10_000.0);
         // Clockwise in y-down = counter-clockwise negated in PDF's y-up space.
-        let s = format!(
-            "BT\n{}\n/F{} {} Tf\n{} {} {} {} {} {} Tm\n{} Tj\nET",
-            rgb_op(color, false),
-            fi + 1,
-            n(size.min(10_000.0)),
-            n(cs),
-            n(-sn),
-            n(sn),
-            n(cs),
-            n(x),
-            n(self.y(y)),
-            pdf_string(text)
+        let mut s = format!("BT\n{}\n{} {} {} {} {} {} Tm", rgb_op(color, false), n(cs), n(-sn), n(sn), n(cs), n(x), n(self.y(y)));
+        let bold = matches!(
+            font,
+            Font::HelveticaBold | Font::HelveticaBoldOblique | Font::TimesBold | Font::TimesBoldItalic | Font::CourierBold | Font::CourierBoldOblique
         );
+        for run in self.runs(text) {
+            match run {
+                Run::Std(t) => {
+                    let _ = write!(s, "\n/F{} {} Tf\n{} Tj", fi + 1, n(size), pdf_string(&t));
+                }
+                Run::Fallback(gids) => {
+                    self.uses_fallback = true;
+                    let hex: String = gids.iter().map(|g| format!("{g:04X}")).collect();
+                    // The fallback face has one weight: bold text is stroked a little wider.
+                    let weight = if bold { format!("\n{} 2 Tr {} w", rgb_op(color, true), n(size * 0.03)) } else { String::new() };
+                    let _ = write!(s, "\n/F13 {} Tf{weight}\n<{hex}> Tj", n(size));
+                    if bold {
+                        s.push_str("\n0 Tr");
+                    }
+                }
+            }
+        }
+        s.push_str("\nET");
         self.op(&s);
+    }
+
+    /// Splits text into WinAnsi runs for the standard font and glyph runs for the fallback
+    /// face (characters the face lacks, or with no face, stay `?` in the standard font).
+    fn runs(&self, text: &str) -> Vec<Run> {
+        let mut runs: Vec<Run> = Vec::new();
+        for c in text.chars() {
+            let gid = if needs_fallback(c) { self.fallback.as_ref().and_then(|f| f.glyph(c).map(|g| (f, g))) } else { None };
+            match gid {
+                Some((f, g)) => {
+                    let new = fallback::lock(&self.subset).add(f, c, g);
+                    match runs.last_mut() {
+                        Some(Run::Fallback(v)) => v.push(new),
+                        _ => runs.push(Run::Fallback(vec![new])),
+                    }
+                }
+                None => match runs.last_mut() {
+                    Some(Run::Std(t)) => t.push(c),
+                    _ => runs.push(Run::Std(c.to_string())),
+                },
+            }
+        }
+        runs
     }
 
     /// Draws an RGBA image (`pw`×`ph` pixels, row-major, straight alpha) into the box
@@ -512,10 +575,18 @@ pub struct Info {
 }
 
 /// A PDF document under construction.
-#[derive(Default)]
 pub struct PdfDoc {
     pages: Vec<Page>,
     pub info: Info,
+    fallback: Option<Arc<FallbackFont>>,
+    subset: SharedSubset,
+}
+
+impl Default for PdfDoc {
+    /// A document using the system fallback font ([`system_fallback`]).
+    fn default() -> Self {
+        PdfDoc::with_fallback(system_fallback())
+    }
 }
 
 /// PackBits-style run-length encoding (PDF `RunLengthDecode`).
@@ -579,11 +650,31 @@ impl PdfDoc {
         PdfDoc::default()
     }
 
+    /// A document with a specific fallback face (`None`: text outside WinAnsi prints as `?`).
+    pub fn with_fallback(font: Option<Arc<FallbackFont>>) -> PdfDoc {
+        PdfDoc { pages: Vec::new(), info: Info::default(), fallback: font, subset: Arc::new(std::sync::Mutex::new(Subset::default())) }
+    }
+
+    /// The fallback face this document embeds, if any.
+    pub fn fallback(&self) -> Option<&Arc<FallbackFont>> {
+        self.fallback.as_ref()
+    }
+
     /// Adds a page of `width_pt` × `height_pt` points and returns it for drawing.
     pub fn add_page(&mut self, width_pt: f32, height_pt: f32) -> &mut Page {
         let width = if width_pt.is_finite() { width_pt.clamp(3.0, 14_400.0) } else { 612.0 };
         let height = if height_pt.is_finite() { height_pt.clamp(3.0, 14_400.0) } else { 792.0 };
-        self.pages.push(Page { width, height, content: String::new(), fonts: [false; 12], images: Vec::new(), depth: 0 });
+        self.pages.push(Page {
+            width,
+            height,
+            content: String::new(),
+            fonts: [false; 12],
+            uses_fallback: false,
+            fallback: self.fallback.clone(),
+            subset: self.subset.clone(),
+            images: Vec::new(),
+            depth: 0,
+        });
         let i = self.pages.len() - 1;
         &mut self.pages[i]
     }
@@ -626,6 +717,17 @@ impl PdfDoc {
                 let name = Font::ALL.get(i).copied().unwrap_or_default().base_name();
                 let enc = if name.starts_with("Symbol") { "" } else { " /Encoding /WinAnsiEncoding" };
                 objects.push((*id, format!("<< /Type /Font /Subtype /Type1 /BaseFont /{name}{enc} >>").into_bytes()));
+            }
+        }
+        // The embedded fallback subset: five objects (font, CID font, descriptor, program, ToUnicode).
+        if self.pages.iter().any(|p| p.uses_fallback)
+            && let Some(font) = &self.fallback
+        {
+            let subset = fallback::lock(&self.subset);
+            if !subset.is_empty() {
+                let _ = write!(font_dict, "/F13 {next} 0 R ");
+                objects.extend(fallback::font_objects(font, &subset, next));
+                next += 5;
             }
         }
         for page in &mut self.pages {

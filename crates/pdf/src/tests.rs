@@ -277,3 +277,64 @@ fn info_strings_are_capped() {
     let pdf = doc.finish();
     assert_eq!(utf16_entry(&pdf, "/Title").chars().count(), MAX_INFO_CHARS);
 }
+
+/// Tiny OFL subsets of Noto Sans (TrueType: `ab Дом`) and Noto Sans CJK KR (CFF: `가나다 한글`).
+const NOTO_SANS: &[u8] = include_bytes!("../tests/fonts/NotoSans-subset.ttf");
+const NOTO_CJK: &[u8] = include_bytes!("../tests/fonts/NotoSansCJKkr-subset.otf");
+
+/// Text the standard fonts can't encode is set in an embedded subset of the fallback face,
+/// as a CID font with Identity-H and a ToUnicode map; WinAnsi text stays in the standard font.
+#[test]
+fn fallback_font_embeds_a_subset_for_non_winansi_text() {
+    let font = FallbackFont::from_bytes(NOTO_SANS.to_vec(), 0).expect("Noto Sans subset parses");
+    assert!(font.glyph('Д').is_some() && font.glyph('a').is_some() && font.glyph('가').is_none());
+    assert_eq!(font.name(), "NotoSans");
+    assert!(font.advance_1000(font.glyph('Д').unwrap()) > 300);
+    let mut d = PdfDoc::with_fallback(Some(std::sync::Arc::new(font)));
+    let p = d.add_page(200.0, 100.0);
+    p.text(10.0, 50.0, 12.0, Font::HelveticaBold, [0, 0, 0], "ab Дом 가");
+    let pdf = d.finish();
+    check_xref(&pdf);
+    assert!(find(&pdf, b"/F2 12 Tf\n(ab ) Tj").is_some(), "the Latin run stays in Helvetica-Bold (/F2)");
+    assert!(find(&pdf, b"/F13 12 Tf").is_some(), "the Cyrillic run uses the fallback");
+    assert!(find(&pdf, b"2 Tr").is_some(), "bold text is stroked");
+    assert!(find(&pdf, b"( ?) Tj").is_some(), "a glyph the face lacks stays `?`");
+    assert!(find(&pdf, b"/Subtype /Type0").is_some() && find(&pdf, b"/Encoding /Identity-H").is_some());
+    assert!(find(&pdf, b"/Subtype /CIDFontType2").is_some() && find(&pdf, b"/CIDToGIDMap /Identity").is_some());
+    assert!(find(&pdf, b"/FontFile2 ").is_some(), "the subset program is embedded");
+    assert!(find(&pdf, b"beginbfchar").is_some() && find(&pdf, b"<0414>").is_some(), "ToUnicode maps back to U+0414");
+    assert!(pdf.len() < 8_000, "a subset, not the whole face: {} bytes", pdf.len());
+    // Three glyphs (Д, о, м) → subset ids 1..3, in first-use order.
+    assert!(find(&pdf, b"<000100020003> Tj").is_some());
+    assert!(find(&pdf, b"/W [1 [").is_some());
+}
+
+/// A CFF-flavoured face (Noto Sans CJK) embeds as CIDFontType0 with an OpenType FontFile3,
+/// Korean measures with the face's advances, and the CJK run keeps its own `/F13` font.
+#[test]
+fn cff_fallback_embeds_korean_as_cidfonttype0() {
+    let font = FallbackFont::from_bytes(NOTO_CJK.to_vec(), 0).expect("Noto Sans CJK subset parses");
+    let g = font.glyph('한').expect("한");
+    assert_eq!(font.advance_1000(g), 920, "Noto Sans CJK sets Hangul 920/1000 em wide");
+    let mut d = PdfDoc::with_fallback(Some(std::sync::Arc::new(font)));
+    d.add_page(300.0, 100.0).text(10.0, 50.0, 11.0, Font::Helvetica, [0, 0, 0], "한글 2026");
+    let pdf = d.finish();
+    check_xref(&pdf);
+    assert!(find(&pdf, b"/F13 11 Tf\n<00010002> Tj").is_some(), "한글 as subset glyphs 1, 2");
+    assert!(find(&pdf, b"/F1 11 Tf\n( 2026) Tj").is_some());
+    assert!(find(&pdf, b"/Subtype /CIDFontType0").is_some() && find(&pdf, b"/CIDToGIDMap").is_none());
+    assert!(find(&pdf, b"/FontFile3 ").is_some() && find(&pdf, b"/Subtype /OpenType").is_some());
+    assert!(find(&pdf, b"<0001> <D55C>").is_some(), "ToUnicode maps glyph 1 to U+D55C 한");
+    assert!(find(&pdf, b"OTTO").is_some(), "an OpenType CFF program is embedded");
+}
+
+/// Without a fallback face nothing is embedded and such text prints as `?`, as before.
+#[test]
+fn no_fallback_face_keeps_question_marks() {
+    let mut d = PdfDoc::with_fallback(None);
+    d.add_page(100.0, 100.0).text(1.0, 50.0, 10.0, Font::Helvetica, [0, 0, 0], "가a");
+    let pdf = d.finish();
+    assert!(find(&pdf, b"(?a) Tj").is_some());
+    assert!(find(&pdf, b"/Type0").is_none() && find(&pdf, b"/F13").is_none());
+    assert!(needs_fallback('가') && !needs_fallback('?') && !needs_fallback('é'));
+}

@@ -433,8 +433,9 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
     let _ =
         write!(s, "<pageMargins left=\"{}\" right=\"{}\" top=\"{}\" bottom=\"{}\" header=\"{}\" footer=\"{}\"/>", m(0), m(1), m(2), m(3), m(4), m(5));
     s.push_str("<pageSetup");
+    // A sheet that states its paper keeps the attribute even for Letter (id 1, the default).
     if let Some(id) = paper_id(&p.paper)
-        && id != 1
+        && (p.paper_set || id != 1)
     {
         let _ = write!(s, " paperSize=\"{id}\"");
     }
