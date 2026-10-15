@@ -10,12 +10,14 @@
 //!
 //! URL query flags: `?webgl` forces WebGL2; `?sample=sales|budget|grades` opens a sample;
 //! `?host=parent` (inside an `<iframe>`) talks to a same-origin parent page instead: it sends the
-//! workbook to open and stores what GridCraft saves (`host`), and `&author=` names the user for
-//! notes and comments.
+//! workbook to open, runs registry commands, and stores what GridCraft saves (`host`), and
+//! `&author=` names the user for notes and comments.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 #[cfg(target_arch = "wasm32")]
 mod host;
+#[cfg(any(target_arch = "wasm32", test))]
+mod host_protocol;
 #[cfg(target_arch = "wasm32")]
 mod web;
 

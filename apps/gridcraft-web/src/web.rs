@@ -113,6 +113,10 @@ impl eframe::App for WebShell {
             });
         }
         self.app.logic(ctx);
+        // The parent's commands, after the files it sent have opened (`logic` opens them).
+        if let Some(bridge) = &self.bridge {
+            bridge.run_commands(&mut self.app);
+        }
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -274,7 +278,6 @@ fn mime_for(name: &str) -> &'static str {
 }
 
 /// Trigger a browser save dialog or download of `bytes` named after `name`.
-
 fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
     let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
     let window = web_sys::window().ok_or("no window")?;
