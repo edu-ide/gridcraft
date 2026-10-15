@@ -137,6 +137,7 @@ pub(crate) fn paint_pages(
     let Some(pg) = geo.paper.clone() else { return quads };
     p.rect_filled(geo.cells, 0.0, t.desk);
     let cells = p.with_clip_rect(geo.cells);
+    let marks = grid::sheet_marks(app, sh);
     let mut painted = 0usize;
     for (i, j) in pages_iter(geo, &pg) {
         let page = screen_rect(geo, pg.page_rect(i, j));
@@ -161,7 +162,7 @@ pub(crate) fn paint_pages(
         }
         painted += 1;
         let pc = p.with_clip_rect(clip);
-        grid::paint_quadrant(&pc, geo, wb, si, sh, rows, cols, cf, t);
+        grid::paint_quadrant(&pc, geo, wb, si, sh, rows, cols, cf, t, &marks);
         if !pg.is_data_page(i, j) {
             // "Click to add data" pages: faded until something is typed there.
             pc.rect_filled(clip, 0.0, t.grid_bg.gamma_multiply(0.75));

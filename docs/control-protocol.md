@@ -80,3 +80,26 @@ rejected without changing earlier settings. `ui.printSubmit` explicitly submits 
 print-ready PDF without opening a dialog; inspect `ui.printSettings` until `busy` becomes false
 and check `status`/`detail`. The browser keeps its own print hook. PDF export remains separate.
 GridCraft accepts the existing `file.print` sheet/pagination params on `ui.printSubmit`; the engine `file.print` command returns the PDF without spooling.
+
+### Marks and row notes (host overlays)
+
+A host that checks a workbook against sources (such as an evidence checker embedding the web
+build) paints its findings with engine commands, reachable through `engine.execute`, MCP, the CLI
+and the web bridge's `gridcraft:command`:
+
+| Command | Params | Result |
+|---|---|---|
+| `marks.set` | `{key, ranges: [{sheet, range: "B3:D7" \| "3:5", stroke, fill, strokeWidth?}]}` | `{applied, missingSheets, skipped, dropped}` |
+| `marks.clear` | `{key?}` (all keys without one) | `{cleared}` |
+| `marks.visible` | `{key, on}` | `{key, on}` |
+| `notes.set` | `{notes: [{sheet, row (1-based), verdict, sentence, unsupportedNumbers, aiReview?, axes?}]}` | `{applied, missingSheets, skipped, dropped}` |
+| `workbook.sheets` | `{}` | `{sheets: [name], active: name}` |
+
+`marks.set` replaces the marks under `key`; `fill` is painted under the cell text and `stroke`
+(CSS colours: `#rgb[a]`, `#rrggbb[aa]`, `rgb()`, `rgba()`, `transparent`) on top of it. A sheet
+name matches exactly first, then ignoring spaces and case, then when one contains the other that
+way; names that match no sheet come back in `missingSheets`. Whole rows (`3:5`) span the sheet's
+columns. Items past 10,000 are counted in `dropped`; malformed ones are listed in `skipped` with a
+reason. Clicking a row covered by a visible mark opens that row's note in place; Escape or a click
+elsewhere closes it. Marks and notes are view state: they are never saved in the file, never added
+to the undo history or the journal, and never mark the workbook as changed.

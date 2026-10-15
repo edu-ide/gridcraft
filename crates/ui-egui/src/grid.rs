@@ -8,6 +8,7 @@ use std::sync::Arc;
 use egui::{Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use gridcraft_engine::cf::{CfCache, CfLook};
 use gridcraft_engine::core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, col_to_letters};
+use gridcraft_engine::marks::Mark;
 use gridcraft_engine::model::{BorderLine, BorderStyle, Color, HAlign, LineIndex, PatternType, Sheet, Style, Underline, VAlign, Workbook};
 use serde_json::json;
 
@@ -149,6 +150,8 @@ pub struct GridState {
     pub hscroll: Option<Rect>,
     /// Ctrl+wheel zoom in progress (see [`WheelZoom`]).
     pub wheel_zoom: Option<WheelZoom>,
+    /// The row note (`notes.set`) open in place: sheet name, 1-based row, where it opened.
+    pub note_popover: Option<(String, u32, Pos2)>,
 }
 
 /// Ctrl+wheel zoom for one (doc uid, sheet). egui eases a notch in over several frames and
@@ -750,8 +753,10 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     }
     // Interaction.
     let previous_popups = (app.grid.filter_menu, app.grid.list_picker, app.grid.header_menu);
+    let previous_note = app.grid.note_popover.clone();
     crate::paper_view::interact(app, ui, &resp, &geo, sh, &wb);
     interact(app, ui, &resp, &geo, sh, &wb);
+    note_click(app, ui, &resp, &geo, sh);
     crate::text_box::show(app, ui, &geo, sh);
     if app.editor.as_ref().is_some_and(|e| !e.from_formula_bar) {
         in_cell_editor(app, ui, &geo, sh, &wb);
@@ -759,6 +764,7 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     filter_menu(app, ui, &geo, previous_popups.0 == app.grid.filter_menu);
     list_picker(app, ui, &geo, previous_popups.1 == app.grid.list_picker);
     header_menu(app, ui, previous_popups.2 == app.grid.header_menu);
+    note_popover(app, ui, &sh.name, previous_note.is_some() && previous_note == app.grid.note_popover);
     context_menu(app, ui);
     let track_x = if rtl { (available.left(), rect.left()) } else { (rect.right(), available.right()) };
     vertical_scrollbar(app, ui, sh, &geo, track_x, max_y, &t);
@@ -799,12 +805,13 @@ fn paint_panes(
     if geo.fr > 0 && geo.fc > 0 {
         quads.push((fr_rows, fr_cols, Rect::from_min_max(geo.cells.min, split)));
     }
+    let marks = sheet_marks(app, sh);
     for (rows, cols, clip) in &quads {
         if rows.0 > rows.1 || cols.0 > cols.1 {
             continue;
         }
         let p = painter.with_clip_rect(*clip);
-        paint_quadrant(&p, geo, wb, si, sh, *rows, *cols, cf, t);
+        paint_quadrant(&p, geo, wb, si, sh, *rows, *cols, cf, t, &marks);
         paint_selection(&p, geo, sh, sel, outline, t, app, *rows, *cols);
     }
     // Freeze lines.
@@ -815,6 +822,11 @@ fn paint_panes(
         painter.line_segment([pos2(split.x, geo.cells.top()), pos2(split.x, geo.cells.bottom())], Stroke::new(1.0, Color32::from_gray(150)));
     }
     quads
+}
+
+/// The visible marks (`marks.set`) on `sh`.
+pub(crate) fn sheet_marks<'a>(app: &'a SheetApp, sh: &'a Sheet) -> Vec<&'a Mark> {
+    app.session.active().map(|d| d.visible_marks(&sh.name).collect()).unwrap_or_default()
 }
 
 /// The worksheet is painted virtually, so it needs its own scrollbar rather than a
@@ -1030,6 +1042,7 @@ pub(crate) fn paint_quadrant(
     cols: (u32, u32),
     cf: &mut CfCache,
     t: &Tokens,
+    marks: &[&Mark],
 ) {
     let z = geo.z;
     let (r0, r1) = rows;
@@ -1088,6 +1101,12 @@ pub(crate) fn paint_quadrant(
             p.rect_filled(rect.shrink(0.5), 0.0, Color32::WHITE);
         }
         looks.push((anchor, rect, lk, cfl));
+    }
+    // Marks (`marks.set`): view state painted over the cell fills, under the text.
+    for m in marks {
+        if let Some(r) = mark_rect(geo, sh, m.range, rows, cols, 0.0) {
+            p.rect_filled(r, 0.0, mark_color(m.fill));
+        }
     }
     // Text and per-cell decorations.
     for (c, rect, lk, cfl) in &looks {
@@ -1392,6 +1411,43 @@ pub(crate) fn paint_quadrant(
         p.rect_stroke(r, 2.0, Stroke::new(1.0, Color32::from_gray(170)), StrokeKind::Inside);
         crate::icons::paint(p, r.shrink(1.5), if active { crate::icons::Icon::Filter } else { crate::icons::Icon::Chevron }, Color32::from_gray(70));
     }
+    // Mark outlines go on top of the cell contents.
+    for m in marks {
+        let width = m.stroke_width * z;
+        if let Some(r) = mark_rect(geo, sh, m.range, rows, cols, width) {
+            p.rect_stroke(r, 0.0, Stroke::new(width, mark_color(m.stroke)), StrokeKind::Inside);
+        }
+    }
+}
+
+fn mark_color(c: [u8; 4]) -> Color32 {
+    Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
+}
+
+/// The screen rect of the part of `range` inside a pane's `rows` and `cols`, or `None` when none
+/// of it is there. Whole rows (`3:5`) end with the pane instead of at column XFD; a side cut off
+/// that way is pushed `overhang` past the pane, so an outline only shows on the range's own edges.
+pub fn mark_rect(geo: &Geo, sh: &Sheet, range: RangeRef, rows: (u32, u32), cols: (u32, u32), overhang: f32) -> Option<Rect> {
+    if rows.0 > rows.1 || cols.0 > cols.1 {
+        return None;
+    }
+    let pane = RangeRef::new(CellRef::new(rows.0, cols.0), CellRef::new(rows.1, cols.1));
+    let cut = range.intersection(&pane)?;
+    let mut r = geo.range_rect(sh, cut);
+    let pad = if overhang.is_finite() { overhang.clamp(0.0, 64.0) + 1.0 } else { 1.0 };
+    if range.start.col < cut.start.col {
+        r.min.x -= pad;
+    }
+    if range.end.col > cut.end.col {
+        r.max.x += pad;
+    }
+    if range.start.row < cut.start.row {
+        r.min.y -= pad;
+    }
+    if range.end.row > cut.end.row {
+        r.max.y += pad;
+    }
+    (r.is_finite() && r.is_positive()).then_some(r)
 }
 
 pub fn filter_button_rect(geo: &Geo, sh: &Sheet, c: CellRef) -> Rect {
@@ -2733,6 +2789,56 @@ fn popup_dismissed(response: &egui::Response, was_open: bool) -> bool {
     response.ctx.input(|i| !i.focused || i.key_pressed(egui::Key::Escape)) || (was_open && response.clicked_elsewhere())
 }
 
+/// A primary click on a cell opens the note (`notes.set`) of its row when a visible mark
+/// (`marks.set`) covers that row on this sheet, and closes an open note otherwise. The click
+/// selects the cell as usual. Any column of a marked row counts: the marks are row bands.
+fn note_click(app: &mut SheetApp, ui: &egui::Ui, resp: &egui::Response, geo: &Geo, sh: &Sheet) {
+    if !resp.clicked_by(egui::PointerButton::Primary) {
+        return;
+    }
+    let Some(at) = ui.ctx().input(|i| i.pointer.interact_pos()) else { return };
+    let p = geo.mirror_pos(at);
+    if !geo.in_cells(p) {
+        return;
+    }
+    let row = geo.cell_at(sh, p).row;
+    let Some(d) = app.session.active() else { return };
+    let row1 = row.saturating_add(1);
+    app.grid.note_popover = (d.row_marked(&sh.name, row) && d.note_at(&sh.name, row1).is_some()).then(|| (sh.name.clone(), row1, at));
+}
+
+/// The open row note, in place under the click; Escape or a click elsewhere closes it.
+fn note_popover(app: &mut SheetApp, ui: &mut egui::Ui, sheet: &str, was_open: bool) {
+    let Some((name, row, at)) = app.grid.note_popover.clone() else { return };
+    let Some(note) = app.session.active().filter(|_| name == sheet).and_then(|d| d.note_at(&name, row)).cloned() else {
+        app.grid.note_popover = None;
+        return;
+    };
+    let lang = crate::i18n::current(ui.ctx());
+    let response = egui::Area::new(egui::Id::new("row_note")).fixed_pos(at + vec2(4.0, 8.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.set_max_width(360.0);
+            ui.label(egui::RichText::new(&note.verdict).strong());
+            if !note.sentence.is_empty() {
+                ui.label(&note.sentence);
+            }
+            if !note.unsupported_numbers.is_empty() {
+                ui.label(format!("{}: {}", lang.tr("Unsupported numbers"), note.unsupported_numbers.join(", ")));
+            }
+            if let Some(ai) = note.ai_review.as_ref().filter(|a| !a.verdict.is_empty() || !a.reason.is_empty()) {
+                ui.label(format!("{}: {} {}", lang.tr("AI review"), ai.verdict, ai.reason));
+            }
+            for axis in note.axes.iter().take(12) {
+                let source = axis.sources.first().map(|s| format!(" ({} {})", s.path, s.locator)).unwrap_or_default();
+                ui.label(egui::RichText::new(format!("{} · {}{source}", axis.axis, axis.verdict)).small());
+            }
+        });
+    });
+    if popup_dismissed(&response.response, was_open) {
+        app.grid.note_popover = None;
+    }
+}
+
 /// The table whose header cell (`row`, `col`) was clicked, not just the first table in the column.
 fn filter_table_range(sh: &Sheet, col: u32, row: u32) -> Option<RangeRef> {
     sh.tables.iter().find(|t| t.range.start.row == row && col >= t.range.start.col && col <= t.range.end.col).map(|t| t.range)
@@ -3626,5 +3732,36 @@ mod outline_band_tests {
         let clip = Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 600.0));
         assert!(outline_bands(Rect::from_min_max(pos2(900.0, 0.0), pos2(950.0, 20.0)), 2.0, clip).is_empty());
         assert!(outline_bands(Rect::from_min_max(pos2(f32::NAN, 0.0), pos2(1.0, 1.0)), 2.0, clip).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod mark_rect_tests {
+    use super::*;
+
+    fn geo(sh: &Sheet) -> Geo {
+        Geo::new(sh, Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 600.0)), egui::Vec2::ZERO)
+    }
+
+    #[test]
+    fn whole_rows_end_with_the_pane_and_overhang_its_cut_sides() {
+        let sh = Sheet::new("S");
+        let geo = geo(&sh);
+        let rows = RangeRef::parse("3:5").unwrap_or_else(|| RangeRef::cell(CellRef::new(0, 0)));
+        let r = mark_rect(&geo, &sh, rows, (0, 30), (0, 12), 2.0).unwrap_or(Rect::NOTHING);
+        let own = geo.range_rect(&sh, RangeRef::new(CellRef::new(2, 0), CellRef::new(4, 12)));
+        assert_eq!((r.top(), r.bottom(), r.left()), (own.top(), own.bottom(), own.left()), "rows 3-5 from column A");
+        assert!(r.right() > own.right() && r.right() < own.right() + 8.0, "cut at the pane's last column, outline pushed past it");
+    }
+
+    #[test]
+    fn ranges_outside_the_pane_and_hostile_numbers_draw_nothing() {
+        let sh = Sheet::new("S");
+        let geo = geo(&sh);
+        let far = RangeRef::new(CellRef::new(500, 0), CellRef::new(510, 3));
+        assert!(mark_rect(&geo, &sh, far, (0, 30), (0, 12), 1.0).is_none());
+        assert!(mark_rect(&geo, &sh, RangeRef::all(), (5, 1), (0, 12), 1.0).is_none(), "an empty pane");
+        let all = mark_rect(&geo, &sh, RangeRef::all(), (0, 30), (0, 12), f32::NAN).unwrap_or(Rect::NOTHING);
+        assert!(all.is_finite() && all.is_positive(), "the whole sheet is cut to the pane");
     }
 }

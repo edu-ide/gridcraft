@@ -3,6 +3,8 @@
 pub(super) fn translate(text: &str) -> Option<&'static str> {
     Some(match text {
         "Paste" => "붙여넣기",
+        "Unsupported numbers" => "미확인 수치",
+        "AI review" => "AI 재심",
         "Paste Values" => "값 붙여넣기",
         "Paste Formulas" => "수식 붙여넣기",
         "Paste Formatting" => "서식 붙여넣기",

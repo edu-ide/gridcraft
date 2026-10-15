@@ -14,6 +14,7 @@ pub mod display;
 pub mod fill;
 pub mod io;
 pub mod links;
+pub mod marks;
 pub mod outline;
 pub mod paper;
 pub mod pivot;
@@ -112,6 +113,11 @@ pub struct DocState {
     /// The format `path`'s content was recognised as when its extension doesn't name one (an
     /// XLSX called `budget.dat`): Save writes it back in that format.
     pub content_kind: Option<io::FileKind>,
+    /// Ranges a host paints over the grid, by key (`marks.set`). View state: never saved,
+    /// never undone, never dirty.
+    pub marks: Vec<marks::MarkSet>,
+    /// Notes shown when a marked row is clicked (`notes.set`). View state like `marks`.
+    pub notes: Vec<marks::RowNote>,
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -137,6 +143,8 @@ impl DocState {
             sheet_selections: vec![],
             unlocked_ranges: vec![],
             content_kind: None,
+            marks: vec![],
+            notes: vec![],
         }
     }
     pub fn is_dirty(&self) -> bool {
